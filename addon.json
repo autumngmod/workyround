@@ -5,8 +5,5 @@
   "authors": ["smokingplaya"],
   "version": "0.1.0",
   "githubRepo": "https://github.com/autumngmod/workyround",
-  "side": ["server", "client"],
-  "dependencies": {
-    "autumngmod/asyncy": "0.1.2"
-  }
+  "side": ["server", "client"]
 }
