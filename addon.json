@@ -1,0 +1,12 @@
+{
+  "$schema": "https://raw.githubusercontent.com/autumngmod/json/refs/heads/main/addon.scheme.json",
+  "name": "workyround",
+  "description": "Gmod disallows html/css/js/other files to be sent. Let's fix it!",
+  "authors": ["smokingplaya"],
+  "version": "0.1.0",
+  "githubRepo": "https://github.com/autumngmod/workyround",
+  "side": ["server", "client"],
+  "dependencies": {
+    "autumngmod/asyncy": "0.1.2"
+  }
+}
