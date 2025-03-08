@@ -4,6 +4,10 @@
 -- console commands:
 --  worky: (superadmin only) - updates the list of files (makes it actual) on the server and sends it to all players
 --
+-- convars:
+--   worky_autostart (0/1) - Will the client send a file list request immediately after logging into the server? (timer.Simple(0))
+--    worky_maxsize (0-10) - Maximum file size you can send (in Mb)
+--
 -- net messages:
 --  wrky:
 --    client -> server: the client requested a list of files
@@ -13,9 +17,9 @@
 --    server -> client: the server sent one of the requested files to the client
 --
 -- hooks:
---  workyFile(string path, boolean downloaded) - when file is done
+--  workyDownloaded(string path, boolean downloaded) - when file is done
 --    either the file has been downloaded or the file checksum matches
---
+--  workyDownloading(string pathing, number segment (0-15), numbers segmentCount (0-15), numbers #bin (bytes written)) - file downloading process
 
 file.CreateDir("worky")
 
@@ -23,6 +27,9 @@ if SERVER then
   util.AddNetworkString("wrky") -- worky
   util.AddNetworkString("wrkyr") -- worky read
   util.AddNetworkString("wrkyu") -- worky update
+
+  CreateConVar("worky_autostart", "1", FCVAR_LUA_SERVER + FCVAR_ARCHIVE + FCVAR_NOTIFY, "Should request files immediately after player spawned?", 0, 1)
+  local maxSize = CreateConVar("worky_maxsize", "5", FCVAR_LUA_SERVER + FCVAR_ARCHIVE + FCVAR_NOTIFY, "Max size per file", 0, 15):GetInt() * 1000 * 1000 // mb to bytes
 
   ---@param baseDir string
   ---@return table<string, number>
@@ -32,11 +39,12 @@ if SERVER then
 
     for _, filename in ipairs(files) do
       local path = baseDir .. "/" .. filename
-      local content = file.Read(path, "DATA")
+      local size = file.Size(path, "DATA")
 
-      if #content > 64000 then
-        print("file \"" .. path .. "\" bigger than 64Kb, ignore it.")
+      if size > maxSize then
+        print("[workyround] file \"" .. path .. "\" bigger than " .. (maxSize/1000/1000) .. "Mb (" .. math.Round(size / 1000 / 1000, 1) .. "Mb), skipping it.")
       else
+        local content = file.Read(path, "DATA")
         result[path] = util.CRC(content)
       end
     end
@@ -82,6 +90,7 @@ if SERVER then
     updateFileList()
   end)
 
+  -- file list
   net.Receive("wrky", function(_, client)
     net.Start("wrky")
     net.WriteUInt(wrky.storageSize, 10)
@@ -95,19 +104,32 @@ if SERVER then
     net.Send(client)
   end)
 
+  -- send file
   net.Receive("wrkyr", function(_, client)
     local data = net.ReadData(net.ReadUInt(16))
     local files = util.Decompress(data):Split(",")
 
     for _, relPath in ipairs(files) do
       local path = "worky/" .. relPath
-      local content = file.Read(path, "DATA")
+      local size = file.Size(path, "DATA")
 
-      if content then
-        net.Start("wrkyr")
-        net.WriteString(relPath)
-        net.WriteData(util.Compress(content))
-        net.Send(client)
+      // [path <1Kb][part 4Bytes][partCount 4Bytes][62Kb/per request: content]
+      if (size > 0) then
+        local content = file.Read(path, "DATA")
+        local segments = math.ceil(size / 62000)
+
+        for i = 1, segments do
+          local startByte = (i - 1) * 62000 + 1
+          local endByte = math.min(i * 62000, size)
+          local segmentData = content:sub(startByte, endByte)
+
+          net.Start("wrkyr")
+          net.WriteUInt(i, 4) // current segment
+          net.WriteUInt(segments, 4) // segment count
+          net.WriteString(relPath)
+          net.WriteData(util.Compress(segmentData)) // payload
+          net.Send(client)
+        end
       end
     end
   end)
@@ -127,10 +149,10 @@ local function validate(filelist)
 
     if v == 0 then
       file.CreateDir(path)
-    elseif file.Read(path .. ".txt", "DATA") ~= v then
+    elseif util.CRC(file.Read(path .. ".txt", "DATA")) ~= tostring(v) then
       requiredFiles[#requiredFiles+1] = k
     else
-      hook.Run("workyFile", path, false)
+      hook.Run("workyDownloaded", k, false)
     end
   end
 
@@ -139,15 +161,30 @@ local function validate(filelist)
   return util.Compress(table.concat(requiredFiles, ","))
 end
 
+-- file saving
 net.Receive("wrkyr", function(len)
-  local path = net.ReadString()
-  local bin = net.ReadData((len - #path) / 8)
+  local segment = net.ReadUInt(4) // current segment
+  local segmentCount = net.ReadUInt(4) // count of segments
+  local virtualPath = net.ReadString() // path to the file
+  local bin = net.ReadData((len - #virtualPath - 8) / 8) // content
 
+  local path = "worky/" .. virtualPath .. ".txt"
   local content = util.Decompress(bin)
 
-  file.Write("worky/" .. path .. ".txt", content)
+  // clearing file before write data into it
+  if (segment == 1) then
+    file.Delete(path, "DATA")
+  end
 
-  hook.Run("workyFile", path, true)
+  // writing data
+  file.Append(path, content)
+
+  hook.Run("workyDownloading", virtualPath, segment, segmentCount, #bin, true)
+
+  if (segment == segmentCount) then
+    // downloaded
+    hook.Run("workyDownloaded", virtualPath, true)
+  end
 end)
 
 net.Receive("wrky", function()
@@ -176,4 +213,8 @@ end
 
 net.Receive("wrkyu", getFileList)
 
-getFileList()
+local shouldAutoStart = GetConVar("worky_autostart")
+
+if (shouldAutoStart:GetBool()) then
+  timer.Simple(0, getFileList)
+end
