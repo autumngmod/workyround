@@ -23,13 +23,13 @@
 
 file.CreateDir("worky")
 
+CreateConVar("worky_autostart", "1", {FCVAR_REPLICATED, FCVAR_NOTIFY, FCVAR_ARCHIVE}, "Should request files immediately after player spawned?", 0, 1)
 if SERVER then
   util.AddNetworkString("wrky") -- worky
   util.AddNetworkString("wrkyr") -- worky read
   util.AddNetworkString("wrkyu") -- worky update
 
-  CreateConVar("worky_autostart", "1", FCVAR_LUA_SERVER + FCVAR_ARCHIVE + FCVAR_NOTIFY, "Should request files immediately after player spawned?", 0, 1)
-  local maxSize = CreateConVar("worky_maxsize", "5", FCVAR_LUA_SERVER + FCVAR_ARCHIVE + FCVAR_NOTIFY, "Max size per file", 0, 15):GetInt() * 1000 * 1000 // mb to bytes
+  local maxSize = CreateConVar("worky_maxsize", "5", {FCVAR_LUA_SERVER, FCVAR_ARCHIVE, FCVAR_NOTIFY}, "Max size per file", 0, 15):GetInt() * 1000 * 1000 // mb to bytes
 
   ---@param baseDir string
   ---@return table<string, number>
@@ -149,7 +149,7 @@ local function validate(filelist)
 
     if v == 0 then
       file.CreateDir(path)
-    elseif util.CRC(file.Read(path .. ".txt", "DATA")) ~= tostring(v) then
+    elseif util.CRC(file.Read(path .. ".txt", "DATA") or "") ~= tostring(v) then
       requiredFiles[#requiredFiles+1] = k
     else
       hook.Run("workyDownloaded", k, false)
@@ -213,8 +213,10 @@ end
 
 net.Receive("wrkyu", getFileList)
 
-local shouldAutoStart = GetConVar("worky_autostart")
+timer.Simple(0, function()
+  local shouldAutoStart = GetConVar("worky_autostart")
 
-if (shouldAutoStart:GetBool()) then
-  timer.Simple(0, getFileList)
-end
+  if (shouldAutoStart:GetBool()) then
+    getFileList()
+  end
+end)
