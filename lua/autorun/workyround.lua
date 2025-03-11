@@ -26,13 +26,18 @@ wrky = {}
 
 file.CreateDir("worky")
 
-CreateConVar("worky_autostart", "1", {FCVAR_REPLICATED, FCVAR_NOTIFY, FCVAR_ARCHIVE}, "Should request files immediately after player spawned?", 0, 1)
+CreateConVar("worky_autostart", "1", FCVAR_REPLICATED + FCVAR_NOTIFY + FCVAR_ARCHIVE, "Should request files immediately after player spawned?", 0, 1)
+
 if SERVER then
   util.AddNetworkString("wrky") -- worky
   util.AddNetworkString("wrkyr") -- worky read
   util.AddNetworkString("wrkyu") -- worky update
 
-  local maxSize = CreateConVar("worky_maxsize", "5", {FCVAR_LUA_SERVER, FCVAR_ARCHIVE, FCVAR_NOTIFY}, "Max size per file", 0, 15):GetInt() * 1000 * 1000 -- mb to bytes
+  local maxSize = CreateConVar("worky_maxsize", "5", FCVAR_LUA_SERVER + FCVAR_ARCHIVE + FCVAR_REPLICATED, "Max size per file", 0, 15):GetInt() * 1000 * 1000 -- mb to bytes
+
+  cvars.AddChangeCallback(worky_maxsize, function(_, _, new)
+    maxSize = tonumber(new) or 5
+  end)
 
   ---@param baseDir string
   ---@return table<string, number>
