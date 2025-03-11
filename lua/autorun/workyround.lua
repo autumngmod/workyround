@@ -179,7 +179,7 @@ end
 net.Receive("wrkyr", function(len)
   local segment = net.ReadUInt(4) -- current segment
   local segmentCount = net.ReadUInt(4) -- count of segments
-  local fileSize = net.ReadUInt(14) -- size of file in kilobytes | (10mb = 10000kb => we need to send number 10000 at maxmium)
+  local fileSize = net.ReadFloat() -- size of file in kilobytes | (10mb = 10000kb => we need to send number 10000 at maxmium)
   local virtualPath = net.ReadString() -- path to the file
   local bin = net.ReadData((len - #virtualPath - 4 - 4 - 32) / 8) -- #virtualPath - segment - segmentCount - ReadFloat (4 bytes = 32 bit)
 
@@ -200,7 +200,7 @@ net.Receive("wrkyr", function(len)
   --- segmentCount summary count of segments
   --- #bin/1000 size of saved segment in Kb
   --- fileSize summary file size in Kb
-  hook.Run("workyDownloading", virtualPath, segment, segmentCount, #bin / 1000, fileSize)
+  hook.Run("workyDownloading", virtualPath, segment, segmentCount, #bin / 1000, math.Round(fileSize, 2))
 
   if (segment == segmentCount) then
     -- downloaded
