@@ -126,6 +126,7 @@ if SERVER then
           net.Start("wrkyr")
           net.WriteUInt(i, 4) // current segment
           net.WriteUInt(segments, 4) // segment count
+          net.WriteUInt(size/1000, 14)
           net.WriteString(relPath)
           net.WriteData(util.Compress(segmentData)) // payload
           net.Send(client)
@@ -136,6 +137,14 @@ if SERVER then
 
   return -- end of the serverside
 end
+
+---@diagnostic disable-next-line: lowercase-global
+workyround = {}
+workyround.isDownloaded = false -- were the files downloaded initially?
+---@type string[]
+workyround.downloaded = {} -- list of a downloaded files
+---@type string[]
+workyround.fileList = {}
 
 -- CLIENT --
 
@@ -165,6 +174,7 @@ end
 net.Receive("wrkyr", function(len)
   local segment = net.ReadUInt(4) // current segment
   local segmentCount = net.ReadUInt(4) // count of segments
+  local fileSize = net.ReadUInt(14) // size of file in kilobytes | (10mb = 10000kb => we need to send number 10000 at maxmium)
   local virtualPath = net.ReadString() // path to the file
   local bin = net.ReadData((len - #virtualPath - 8) / 8) // content
 
@@ -179,15 +189,30 @@ net.Receive("wrkyr", function(len)
   // writing data
   file.Append(path, content)
 
-  hook.Run("workyDownloading", virtualPath, segment, segmentCount, #bin, true)
+  --- virtualPath: path to file relative to data/worky
+  --- segment current segment
+  --- segmentCount summary count of segments
+  --- #bin/1000 size of saved segment in Kb
+  --- fileSize summary file size in Kb
+  hook.Run("workyDownloading", virtualPath, segment, segmentCount, #bin / 1000, fileSize)
 
   if (segment == segmentCount) then
     // downloaded
     hook.Run("workyDownloaded", virtualPath, true)
+
+    workyround.downloaded[#workyround.downloaded+1] = virtualPath
+
+    if (#workyround.downloaded == #workyround.fileList) then
+      workyround.isDownloaded = true
+
+      hook.Run("workyDone")
+    end
   end
 end)
 
 net.Receive("wrky", function()
+  -- workyround.downloaded = {}
+
   local list = {}
   local size = net.ReadUInt(10)
   if size == 0 then return end
@@ -196,6 +221,8 @@ net.Receive("wrky", function()
     local key = util.Decompress(net.ReadData(net.ReadUInt(8)))
     list[key] = net.ReadUInt(32)
   end
+
+  workyround.fileList = list
 
   local bin = validate(list)
   if not bin then return end
