@@ -35,7 +35,7 @@ if SERVER then
 
   local maxSize = CreateConVar("worky_maxsize", "5", FCVAR_LUA_SERVER + FCVAR_ARCHIVE + FCVAR_REPLICATED, "Max size per file", 0, 15):GetInt() * 1000 * 1000 -- mb to bytes
 
-  cvars.AddChangeCallback(worky_maxsize, function(_, _, new)
+  cvars.AddChangeCallback("worky_maxsize", function(_, _, new)
     maxSize = tonumber(new) or 5
   end)
 
