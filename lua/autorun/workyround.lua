@@ -127,7 +127,7 @@ if SERVER then
           net.Start("wrkyr")
           net.WriteUInt(i, 4) -- current segment
           net.WriteUInt(segments, 4) -- segment count
-          net.WriteUInt(size/1000, 14)
+          net.WriteFloat(size/1000)
           net.WriteString(relPath)
           net.WriteData(util.Compress(segmentData)) -- payload
           net.Send(client)
@@ -181,7 +181,7 @@ net.Receive("wrkyr", function(len)
   local segmentCount = net.ReadUInt(4) -- count of segments
   local fileSize = net.ReadUInt(14) -- size of file in kilobytes | (10mb = 10000kb => we need to send number 10000 at maxmium)
   local virtualPath = net.ReadString() -- path to the file
-  local bin = net.ReadData((len - #virtualPath - 4 - 4 - 14) / 8) -- content
+  local bin = net.ReadData((len - #virtualPath - 4 - 4 - 32) / 8) -- #virtualPath - segment - segmentCount - ReadFloat (4 bytes = 32 bit)
 
   local path = "worky/" .. virtualPath .. ".txt"
   local content = util.Decompress(bin)
