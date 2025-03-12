@@ -20,6 +20,8 @@ local chunkSize = 100 * kb
 
 file.CreateDir(worky.dir)
 
+CreateConVar("worky_autostart", "1", FCVAR_REPLICATED + FCVAR_NOTIFY + FCVAR_ARCHIVE, "Should request files immediately after player spawned?", 0, 1)
+
 if (SERVER) then
   ---@type FileList
   worky.fileList = worky.fileList or {}
@@ -27,7 +29,6 @@ if (SERVER) then
   worky.fileListCache = worky.fileListCache or {}
   worky.fileListSize = worky.fileListSize or 0
 
-  CreateConVar("worky_autostart", "1", FCVAR_REPLICATED + FCVAR_NOTIFY + FCVAR_ARCHIVE, "Should request files immediately after player spawned?", 0, 1)
   local caching = CreateConVar("worky_caching", "1", FCVAR_LUA_CLIENT + FCVAR_ARCHIVE, "Should the files from /data/worky/ be saved to the server RAM? (increases RAM consumption, but reduces CPU load)", 0, 1)
   -- client <=> server
   -- Client => Server: Requests for a files in server's data/worky directory ({string: string} -> {path: crc})
@@ -162,7 +163,6 @@ if (SERVER) then
     return worky.computeCompressedChunks(file.Read(path, "DATA"))
   end
 
-  ---@param
   ---@param path string
   ---@param chunkId number Id of a chunk
   ---@param chunks number Summary count of a file's chunks
