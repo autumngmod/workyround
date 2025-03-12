@@ -396,6 +396,8 @@ function worky.validate()
 
       hook.Run("WorkyReady")
 
+      worky.isDownloaded = true
+
       return
     end
 
