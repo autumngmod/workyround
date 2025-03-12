@@ -393,6 +393,9 @@ function worky.validate()
 
     if (#mismatches == 0) then
       worky.logger:info("All files are up-to-date")
+
+      hook.Run("WorkyReady")
+
       return
     end
 
