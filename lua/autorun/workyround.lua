@@ -236,7 +236,7 @@ if (SERVER) then
 end
 
 worky.downloading = {}
-
+worky.isDownloaded = false
 
 --- Reads FileList from ``net`` message
 ---
@@ -362,6 +362,8 @@ function worky.removeFromDownloadList(path)
 
   if (#worky.downloading == 0) then
     hook.Run("WorkyReady")
+
+    worky.isDownloaded = true
   end
 end
 
