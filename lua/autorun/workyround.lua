@@ -1,67 +1,93 @@
---
--- small documentation
---
--- console commands:
---  worky: (superadmin only) - updates the list of files (makes it actual) on the server and sends it to all players
---
--- convars:
---   worky_autostart (0/1) - Will the client send a file list request immediately after logging into the server? (timer.Simple(0))
---    worky_maxsize (0-10) - Maximum file size you can send (in Mb)
---
--- net messages:
---  wrky:
---    client -> server: the client requested a list of files
---    server -> client: the server responded to the client with a list of files
---  wrkyr:
---    client -> server: the client sent a list of missing files (actually, a string) to the server
---    server -> client: the server sent one of the requested files to the client
---
--- hooks:
---  workyDownloaded(string path, boolean downloaded) - when file is done
---    either the file has been downloaded or the file checksum matches
---  workyDownloading(string pathing, number segment (0-15), numbers segmentCount (0-15), numbers #bin (bytes written)) - file downloading process
-
 ---@diagnostic disable-next-line: lowercase-global
-wrky = {}
+worky = worky or {}
+worky.dir = "worky/"
+worky.logger = worky.logger or logmo:new("workyround")
 
-file.CreateDir("worky")
+---@alias FileList {string: string}
 
-CreateConVar("worky_autostart", "1", FCVAR_REPLICATED + FCVAR_NOTIFY + FCVAR_ARCHIVE, "Should request files immediately after player spawned?", 0, 1)
+local kb = 1000
+local mb = kb^2
+-- Here is number 3, because of net bandwidth the speed of sending/receiving messages
+-- is limited to ``120Kb/s``, so ``6Mb`` will be downloaded in about a minute.
+--
+-- That's a long time.
+--
+-- So ``3Mb`` is optimal, one file, for example with size ``2.7Mb`` will be downloaded in about 27s.
+--
+-- In modern realities this is very long, but our library is not designed to send large files.
+local maxFileSize = 3 * mb -- 3mb
+local chunkSize = 100 * kb
 
-if SERVER then
-  util.AddNetworkString("wrky") -- worky
-  util.AddNetworkString("wrkyr") -- worky read
-  util.AddNetworkString("wrkyu") -- worky update
+file.CreateDir(worky.dir)
 
-  local maxSize = CreateConVar("worky_maxsize", "5", FCVAR_LUA_SERVER + FCVAR_ARCHIVE + FCVAR_REPLICATED, "Max size per file", 0, 15):GetInt() * 1000 * 1000 -- mb to bytes
+if (SERVER) then
+  ---@type FileList
+  worky.fileList = worky.fileList or {}
+  ---@type {string: string[]}
+  worky.fileListCache = worky.fileListCache or {}
+  worky.fileListSize = worky.fileListSize or 0
 
-  cvars.AddChangeCallback("worky_maxsize", function(_, _, new)
-    maxSize = tonumber(new) or 5
+  CreateConVar("worky_autostart", "1", FCVAR_REPLICATED + FCVAR_NOTIFY + FCVAR_ARCHIVE, "Should request files immediately after player spawned?", 0, 1)
+  local caching = CreateConVar("worky_caching", "1", FCVAR_LUA_CLIENT + FCVAR_ARCHIVE, "Should the files from /data/worky/ be saved to the server RAM? (increases RAM consumption, but reduces CPU load)", 0, 1)
+  -- client <=> server
+  -- Client => Server: Requests for a files in server's data/worky directory ({string: string} -> {path: crc})
+  -- Client <= Server: List of files in server's data/worky directory ({string: string} -> {path: crc})
+  -- used in ``worky.fetch`` function
+  util.AddNetworkString("worky.")
+
+  --- client <=> server
+  --- Client <= Server: Sends the file to the client by chunks
+  util.AddNetworkString("worky.file")
+
+  --- client <= server
+  --- Client <= Server: Notifies the player that a file on the server has been modified
+  util.AddNetworkString("worky.update")
+
+  concommand.Add("worky", function(player)
+    if (IsValid(player) and not player:IsSuperAdmin()) then
+      return
+    end
+
+    worky.logger:info("Updating the file list")
+
+    worky.updateFileList()
   end)
 
-  ---@param baseDir string
-  ---@return table<string, number>
-  local function getFileList(baseDir)
+  --- Recursively collects a file list from the specified folder
+  ---
+  ---@private
+  ---@param baseDir? string
+  ---@return FileList
+  function worky.getChecksumsOfFiles(baseDir)
     local result = {}
-    local files, dirs = file.Find(baseDir .. "/*", "DATA")
 
-    for _, filename in ipairs(files) do
-      local path = baseDir .. "/" .. filename
-      local size = file.Size(path, "DATA")
+    local currentDir = worky.dir .. (baseDir or "")
 
-      if size > maxSize then
-        print("[wrky] file \"" .. path .. "\" bigger than " .. (maxSize/1000/1000) .. "Mb (" .. math.Round(size / 1000 / 1000, 1) .. "Mb), skipping it.")
-      else
-        local content = file.Read(path, "DATA")
-        result[path] = util.CRC(content)
+    local files, dirs = file.Find(currentDir .. "*", "DATA")
+
+    for _, v in ipairs(files) do
+      local path = currentDir .. v
+      local savePath = baseDir .. v
+
+      if (file.Size(path, "DATA") / mb > maxFileSize) then
+        worky.logger:warn(("The %s file is larger than 3mb, it will not be sent to players"):format(savePath))
+
+        continue
+      end
+
+      local content = file.Read(path, "DATA")
+
+      result[savePath] = util.CRC(content)
+
+      if (caching:GetBool()) then
+        worky.fileListCache[savePath] = worky.computeCompressedChunks(content)
       end
     end
 
     for _, dir in ipairs(dirs) do
-      local path = baseDir .. "/" .. dir
-      result[path] = 0 -- dir
+      local checksums = worky.getChecksumsOfFiles((baseDir or "") .. dir .. "/")
 
-      for k, v in pairs(getFileList(path)) do
+      for k, v in pairs(checksums) do
         result[k] = v
       end
     end
@@ -69,192 +95,363 @@ if SERVER then
     return result
   end
 
-  local function updateFileList()
-    local storage = getFileList("worky")
-    local storageSmall = {}
+  --- Updates the file list, and sends a notification of this to all clients
+  function worky.updateFileList()
+    worky.fileList = worky.getChecksumsOfFiles()
+    worky.fileListSize = table.Count(worky.fileList)
 
-    for k, v in pairs(storage) do
-      storageSmall[k:sub(7)] = v -- 7 = #"worky/" + 1
-    end
-
-    wrky.storage = storageSmall
-    wrky.storageSize = table.Count(storageSmall)
-    wrky.storageCompressed = {}
-
-    for k, v in pairs(storageSmall) do
-      wrky.storageCompressed[util.Compress(k)] = v
-    end
-
-    net.Start("wrkyu")
+    -- Notify all players on the server that the list has been updated
+    net.Start("worky.update")
     net.Broadcast()
+
+    worky.logger:info("File list updated")
   end
 
-  updateFileList()
+  --- Sends a file list to the player
+  ---
+  ---@param player Player
+  function worky.sendFileList(player)
+    net.Start("worky.")
+    net.WriteUInt(worky.fileListSize, 9)
 
-  concommand.Add("worky", function(client)
-    if IsValid(client) and not client:IsSuperAdmin() then return end
-    updateFileList()
-  end)
-
-  -- file list
-  net.Receive("wrky", function(_, client)
-    net.Start("wrky")
-    net.WriteUInt(wrky.storageSize, 10)
-
-    for file, checksum in pairs(wrky.storageCompressed) do
-      net.WriteUInt(#file, 8)
-      net.WriteData(file)
-      net.WriteUInt(checksum, 32)
+    for k, v in pairs(worky.fileList) do
+      net.WriteString(k)
+      net.WriteString(v)
     end
 
-    net.Send(client)
-  end)
+    net.Send(player)
+  end
 
-  -- send file
-  net.Receive("wrkyr", function(_, client)
-    local data = net.ReadData(net.ReadUInt(16))
-    local files = util.Decompress(data):Split(",")
+  --- Splits the file into compressed chunks
+  ---
+  ---@param content string
+  ---@return string[]
+  function worky.computeCompressedChunks(content)
+    local result = {}
+    local chunks = math.ceil(#content / chunkSize)
 
-    for _, relPath in ipairs(files) do
-      local path = "worky/" .. relPath
-      local size = file.Size(path, "DATA")
+    for chunkIndex = 1, chunks do
+      local startByte = (chunkIndex - 1) * chunkSize + 1
+      local endByte = math.min(chunkIndex * chunkSize, #content)
+      local chunk = content:sub(startByte, endByte)
 
-      -- [path <1Kb][part 4Bytes][partCount 4Bytes][fileSize in Kb 14Bytes][62Kb/per request: content]
-      if (size > 0) then
-        local content = file.Read(path, "DATA")
-        local segments = math.ceil(size / 62000)
+      -- same as result[#result+1]
+      result[chunkIndex] = util.Compress(chunk)
+    end
 
-        for i = 1, segments do
-          local startByte = (i - 1) * 62000 + 1
-          local endByte = math.min(i * 62000, size)
-          local segmentData = content:sub(startByte, endByte)
+    return result
+  end
 
-          net.Start("wrkyr")
-          net.WriteUInt(i, 4) -- current segment
-          net.WriteUInt(segments, 4) -- segment count
-          net.WriteFloat(size/1000)
-          net.WriteString(relPath)
-          net.WriteData(util.Compress(segmentData)) -- payload
-          net.Send(client)
-        end
+  --- Returns file's compressed chunks
+  ---
+  ---@param path string
+  ---@return string[] | nil
+  function worky.getFileChunks(path)
+    local cached = worky.fileListCache[path]
+
+    if (cached) then
+      return cached
+    end
+
+    path = worky.dir .. path
+
+    if (not file.Exists(path, "DATA")) then
+      return
+    end
+
+    return worky.computeCompressedChunks(file.Read(path, "DATA"))
+  end
+
+  ---@param
+  ---@param path string
+  ---@param chunkId number Id of a chunk
+  ---@param chunks number Summary count of a file's chunks
+  ---@param chunk string Compressed content
+  ---@param fileSize number
+  ---@param player Player
+  function worky.sendFileChunk(path, chunkId, chunks, chunk, fileSize, player)
+    net.Start("worky.file", true) -- uh uh
+    net.WriteString(path)
+
+    -- Chunk number
+    net.WriteUInt(chunkId, 8)
+    -- Number of chunks into which the file was partitioned
+    net.WriteUInt(chunks, 8)
+    -- File size in Kb
+    net.WriteFloat(fileSize)
+    -- Chunk size in Bytes
+    net.WriteUInt(#chunk, 16)
+    -- Compressed content
+    net.WriteData(chunk)
+
+    net.Send(player)
+  end
+
+  ---@param path string
+  ---@param fileContent string[]
+  ---@param fileSize number
+  ---@param player Player
+  ---@param chunkId? number = 1
+  -- ``100Kb/s``
+  function worky.sendFile(path, fileContent, fileSize, player, chunkId)
+    chunkId = chunkId or 1
+
+    local chunk = fileContent[chunkId]
+
+    if (!chunk) then
+      return
+    end
+
+    timer.Simple(chunkId == 1 and 0 or 1, function()
+      if (not IsValid(player)) then
+        return
       end
-    end
+
+      worky.sendFileChunk(path, chunkId, #fileContent, chunk, fileSize, player)
+
+      worky.sendFile(path, fileContent, fileSize, player, chunkId + 1)
+    end)
+  end
+
+  -- Network zone
+
+  net.Receive("worky.", function(_, player)
+    worky.sendFileList(player)
   end)
 
-  return -- end of the serverside
+  net.Receive("worky.file", function(_, player)
+    local path = net.ReadString()
+    local fileContent = worky.getFileChunks(path)
+
+    if (not fileContent) then
+      return
+    end
+
+    local fileSize = file.Size(worky.dir .. path, "DATA") / kb -- convertation from bytes to kilobytes
+
+    worky.sendFile(path, fileContent, fileSize, player)
+  end)
+
+  return
 end
 
-wrky.isDownloaded = false -- were the files downloaded initially?
----@type string[]
-wrky.downloaded = {} -- list of a downloaded files
----@type string[]
-wrky.fileList = {}
+worky.downloading = {}
 
--- CLIENT --
 
----@param filelist table<string, number>
----@return string? Binary
-local function validate(filelist)
-  local requiredFiles = {}
+--- Reads FileList from ``net`` message
+---
+---@private
+---@return FileList
+function worky.readFileList()
+  local result = {}
+  local size = net.ReadUInt(9)
 
-  for k, v in pairs(filelist) do
-    local path = "worky/" .. k
+  for i=1, size do
+    local path = net.ReadString()
+    local checksum = net.ReadString()
 
-    if v == 0 then
-      file.CreateDir(path)
-    elseif util.CRC(file.Read(path .. ".txt", "DATA") or "") ~= tostring(v) then
-      requiredFiles[#requiredFiles+1] = k
+    result[path] = checksum
+  end
+
+  return result
+end
+
+--- Requests for a files in server's data/worky directory (string[])
+---
+--- ``Supports coroutines``
+---
+--- ## Example
+--- ```lua
+--- local co = coroutine.create(function()
+---   local list = worky.fetch()
+---
+---   PrintTable(list)
+--- end)
+---
+--- coroutine.resume(co)
+--- ```
+---
+---@param callback? fun(list: FileList)
+---@return FileList | nil (if in coroutine)
+function worky.fetch(callback)
+  net.Start("worky.")
+  net.SendToServer()
+
+  local co = coroutine.running()
+
+  if (co or callback) then
+    net.Receive("worky.", function()
+      local fileList = worky.readFileList()
+
+      if (isfunction(callback)) then
+        ---@diagnostic disable-next-line: need-check-nil
+        callback(fileList)
+      end
+
+      if (co) then
+        coroutine.resume(co, fileList)
+      end
+    end)
+
+    if (co) then
+      return coroutine.yield()
+    end
+  end
+end
+
+--- Compares file list from server, and current files in ``/data/worky`` and return mismatches
+---
+---@private
+---@param list FileList
+---@return FileList
+function worky.compare(list)
+  local mismatches = {}
+
+  for path, checksum in pairs(list) do
+    local content = file.Read(worky.dir .. path .. ".txt", "DATA")
+    local currentChecksum = util.CRC(content or "")
+
+    if (currentChecksum ~= checksum) then
+      mismatches[#mismatches+1] = path
     else
-      hook.Run("workyDownloaded", k, false)
+      hook.Run("WorkyFileReady", path, false)
     end
   end
 
-  if #requiredFiles == 0 then
-    wrky.isDownloaded = true
+  return mismatches
+end
 
-    hook.Run("workyDone")
+--- Converts FileList to an array of strings
+---
+---@private
+---@param list FileList
+---@return string[]
+function worky.listToArray(list)
+  local result = {}
 
+  for _, path in pairs(list) do
+    result[#result+1] = path
+  end
+
+  return result
+end
+
+--- Set actual download list
+---
+---@private
+---@param list string[]
+function worky.setDownloadList(list)
+  worky.downloading = list or {}
+end
+
+--- Removes a file from download list
+---
+---@param path string
+function worky.removeFromDownloadList(path)
+  local index
+
+  for ind, _path in ipairs(worky.downloading) do
+    if (path == _path) then
+      index = ind
+    end
+  end
+
+  if (index) then
+    table.remove(worky.downloading, index)
+  end
+
+  if (#worky.downloading == 0) then
+    hook.Run("WorkyReady")
+  end
+end
+
+--- Requests the specified file from the server
+---@param id? number
+function worky.download(id)
+  net.Start("worky.file")
+  net.WriteString(worky.downloading[id or 1])
+  net.SendToServer()
+end
+
+--- Requests a list of files from the server, checks for inconsistencies and downloads normal files.
+function worky.validate()
+  if (worky.validator) then
     return
   end
 
-  return util.Compress(table.concat(requiredFiles, ","))
-end
+  local co = coroutine.create(function()
+    worky.logger:info("Requesting a list of files")
 
--- file saving
-net.Receive("wrkyr", function(len)
-  local segment = net.ReadUInt(4) -- current segment
-  local segmentCount = net.ReadUInt(4) -- count of segments
-  local fileSize = net.ReadFloat() -- size of file in kilobytes | (10mb = 10000kb => we need to send number 10000 at maxmium)
-  local virtualPath = net.ReadString() -- path to the file
-  local bin = net.ReadData((len - #virtualPath - 4 - 4 - 32) / 8) -- #virtualPath - segment - segmentCount - ReadFloat (4 bytes = 32 bit)
+    local list = worky.fetch()
 
-  local path = "worky/" .. virtualPath .. ".txt"
-  local content = util.Decompress(bin)
+    ---@diagnostic disable-next-line: param-type-mismatch
+    local mismatches = worky.compare(list)
 
-  -- clearing file before write data into it
-  if (segment == 1) then
-    file.CreateDir(path:GetPathFromFilename())
-    file.Delete(path, "DATA")
-  end
+    worky.validator = nil
 
-  -- writing data
-  file.Append(path, content)
-
-  --- virtualPath: path to file relative to data/worky
-  --- segment current segment
-  --- segmentCount summary count of segments
-  --- #bin/1000 size of saved segment in Kb
-  --- fileSize summary file size in Kb
-  hook.Run("workyDownloading", virtualPath, segment, segmentCount, #bin / 1000, math.Round(fileSize, 2))
-
-  if (segment == segmentCount) then
-    -- downloaded
-    hook.Run("workyDownloaded", virtualPath, true)
-
-    wrky.downloaded[#wrky.downloaded+1] = virtualPath
-
-    if (#wrky.downloaded == #wrky.fileList) then
-      wrky.isDownloaded = true
-
-      hook.Run("workyDone")
+    if (#mismatches == 0) then
+      worky.logger:info("All files are up-to-date")
+      return
     end
-  end
-end)
 
-net.Receive("wrky", function()
-  -- wrky.downloaded = {}
+    worky.logger:info(("Downloading %s mismatches files"):format(#mismatches))
 
-  local list = {}
-  local size = net.ReadUInt(10)
-  if size == 0 then return end
+    worky.setDownloadList(worky.listToArray(mismatches))
 
-  for _ = 1, size do
-    local key = util.Decompress(net.ReadData(net.ReadUInt(8)))
-    list[key] = net.ReadUInt(32)
-  end
+    worky.download()
+  end)
 
-  wrky.fileList = list
+  worky.validator = co
 
-  local bin = validate(list)
-  if not bin then return end
-
-  net.Start("wrkyr")
-  net.WriteUInt(#bin, 16)
-  net.WriteData(bin)
-  net.SendToServer()
-end)
-
-local function getFileList()
-  net.Start("wrky")
-  net.SendToServer()
+  coroutine.resume(co)
 end
 
-net.Receive("wrkyu", getFileList)
+-- Auto start
 
 timer.Simple(0, function()
-  local shouldAutoStart = GetConVar("worky_autostart")
+  if (GetConVar("worky_autostart"):GetBool()) then
+    return worky.validate()
+  end
 
-  if (shouldAutoStart:GetBool()) then
-    getFileList()
+  worky.logger:warn("Validate on start is disabled")
+end)
+
+-- Network zone
+
+net.Receive("worky.update", worky.validate)
+
+net.Receive("worky.file", function(len)
+  -- Path to current downloadable file
+  local path = net.ReadString()
+  -- Chunk number
+  local chunk = net.ReadUInt(8)
+  -- Number of chunks into which the file was partitioned
+  local chunks = net.ReadUInt(8)
+  -- File size in Kb
+  local fileSize = net.ReadFloat()
+  -- Chunk size in Bytes
+  local chunkSize = net.ReadUInt(16)
+  -- Compressed content
+  local content = net.ReadData(chunkSize)
+
+  local fullPath = "worky/" .. path .. ".txt"
+
+  if (chunk == 1) then
+    file.CreateDir(fullPath:GetPathFromFilename())
+    file.Delete(fullPath)
+  end
+
+  file.Append(fullPath, util.Decompress(content))
+
+  hook.Run("WorkyDownloading", path, chunkSize/1000, fileSize)
+
+  if (chunk == chunks) then
+    worky.removeFromDownloadList(path)
+
+    if (#worky.downloading ~= 0) then
+      worky.download()
+    end
+
+    hook.Run("WorkyFileReady", path, true)
   end
 end)
