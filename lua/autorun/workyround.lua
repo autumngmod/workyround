@@ -198,7 +198,7 @@ if (SERVER) then
 
     local chunk = fileContent[chunkId]
 
-    if (!chunk) then
+    if (not chunk) then
       return
     end
 
