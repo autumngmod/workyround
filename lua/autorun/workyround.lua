@@ -108,6 +108,8 @@ if (SERVER) then
     worky.logger:info("File list updated")
   end
 
+  worky.updateFileList()
+
   --- Sends a file list to the player
   ---
   ---@param player Player
